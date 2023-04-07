@@ -1,0 +1,93 @@
+# SPDX-License-Identifier: Apache-2.0
+
+# The objects defined in this file are created prior to running each test.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-admin
+  namespace: default
+
+---
+
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: cluster-admin-service-account
+subjects:
+  - kind: ServiceAccount
+    name: cluster-admin
+    namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+
+---
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: backing
+
+---
+
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: backing-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteMany
+  local:
+    path: /var/backing  # set up for us by tests/run.sh
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: inexistent-label
+              operator: DoesNotExist
+  storageClassName: ""
+  claimRef:
+    name: backing-pvc
+    namespace: backing
+
+---
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backing-pvc
+  namespace: backing
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: ""
+  volumeName: backing-pv
+
+---
+
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: storage-class
+provisioner: subprovisioner.gitlab.io
+parameters:
+  backingClaimName: backing-pvc
+  backingClaimNamespace: backing
+  basePath: volumes
+allowVolumeExpansion: true
+
+---
+
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: subprovisioner
+driver: subprovisioner.gitlab.io
+deletionPolicy: Delete

@@ -1,0 +1,260 @@
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: subprovisioner.gitlab.io
+spec:
+  attachRequired: false  # to skip Controller{Publish,Unpublish}Volume()
+  podInfoOnMount: true  # to get client Pod info on NodePublishVolume()
+
+---
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: subprovisioner
+
+---
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: csi-controller-plugin
+  namespace: subprovisioner
+
+---
+
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: subprovisioner-csi-controller-plugin
+rules:
+  # subprovisioner-csi-plugin
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, watch, patch, update]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, create, delete]
+  - apiGroups: [snapshot.storage.k8s.io]
+    resources: [volumesnapshots]
+    verbs: [get, list, patch]
+  # csi-provisioner
+  - apiGroups: [""]
+    resources: [persistentvolumes]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, watch, update]
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [list, watch, create, update, patch]
+  - apiGroups: [snapshot.storage.k8s.io]
+    resources: [volumesnapshots]
+    verbs: [get, list]
+  - apiGroups: [snapshot.storage.k8s.io]
+    resources: [volumesnapshotcontents]
+    verbs: [get, list]
+  - apiGroups: [storage.k8s.io]
+    resources: [csinodes]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+  # csi-resizer
+  - apiGroups: [""]
+    resources: [persistentvolumes]
+    verbs: [get, list, watch, patch]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims/status]
+    verbs: [patch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [list, watch, create, update, patch]
+  # csi-snapshotter
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [list, watch, create, update, patch]
+  - apiGroups: [snapshot.storage.k8s.io]
+    resources: [volumesnapshotclasses]
+    verbs: [get, list, watch]
+  - apiGroups: [snapshot.storage.k8s.io]
+    resources: [volumesnapshotcontents]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [snapshot.storage.k8s.io]
+    resources: [volumesnapshotcontents/status]
+    verbs: [update, patch]
+
+---
+
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: subprovisioner.csi-controller-plugin
+subjects:
+  - kind: ServiceAccount
+    name: csi-controller-plugin
+    namespace: subprovisioner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: subprovisioner-csi-controller-plugin
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: csi-controller-plugin
+  namespace: subprovisioner
+spec:
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: &labels
+      subprovisioner.gitlab.io/component: csi-controller-plugin
+  template:
+    metadata:
+      labels: *labels
+    spec:
+      serviceAccountName: csi-controller-plugin
+      containers:
+        - name: subprovisioner-csi-plugin
+          image: &image subprovisioner/subprovisioner:0.0.0
+          command:
+            - /subprovisioner/csi-plugin
+            - controller-plugin
+            - *image
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /run/csi
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v3.4.0
+          args:
+            - --extra-create-metadata  # to get PVC/PV info in CreateVolume()
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /run/csi
+        - name: csi-resizer
+          image: registry.k8s.io/sig-storage/csi-resizer:v1.7.0
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /run/csi
+        - name: csi-snapshotter
+          image: registry.k8s.io/sig-storage/csi-snapshotter:v6.2.1
+          args:
+            - --extra-create-metadata  # to get VS/VSC info in CreateSnapshot()
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /run/csi
+      volumes:
+        - name: socket-dir
+          emptyDir:
+
+---
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: csi-node-plugin
+  namespace: subprovisioner
+
+---
+
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: subprovisioner-csi-node-plugin
+rules:
+  # subprovisioner-csi-plugin
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, update]
+  - apiGroups: [apps]
+    resources: [replicasets]
+    verbs: [get, list, create, delete]
+
+---
+
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: subprovisioner.csi-node-plugin
+subjects:
+  - kind: ServiceAccount
+    name: csi-node-plugin
+    namespace: subprovisioner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: subprovisioner-csi-node-plugin
+
+---
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: csi-node-plugin
+  namespace: subprovisioner
+spec:
+  selector:
+    matchLabels: &labels
+      subprovisioner.gitlab.io/component: csi-node-plugin
+  template:
+    metadata:
+      labels: *labels
+    spec:
+      serviceAccountName: csi-node-plugin
+      containers:
+        - name: subprovisioner-csi-plugin
+          image: &image subprovisioner/subprovisioner:0.0.0
+          command:
+            - /subprovisioner/csi-plugin
+            - node-plugin
+            - $(NODE_NAME)
+            - *image
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: kubelet-dir
+              mountPath: /var/lib/kubelet
+            - name: socket-dir
+              mountPath: /run/csi
+        - name: node-driver-registrar
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.6.3
+          args:
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/subprovisioner/socket
+          volumeMounts:
+            - name: registration-dir
+              mountPath: /registration
+            - name: socket-dir
+              mountPath: /run/csi
+      volumes:
+        # where kubelet wants volumes to be staged/published
+        - name: kubelet-dir
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+        # where node-driver-registrar registers the plugin with kubelet
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: Directory
+        # where the socket for kubelet <--> plugin communication is created
+        - name: socket-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/subprovisioner
+            type: DirectoryOrCreate
